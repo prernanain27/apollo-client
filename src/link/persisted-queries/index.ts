@@ -30,12 +30,10 @@ export interface ErrorResponse {
 type SHA256Function = (...args: any[]) => string | PromiseLike<string>;
 type GenerateHashFunction = (document: DocumentNode) => string | PromiseLike<string>;
 
-const PersistedQueryNotSupported = "PERSISTED_QUERY_NOT_SUPPORTED";
-const PersistedQueryNotFound = "PERSISTED_QUERY_NOT_FOUND"
-
 export namespace PersistedQueryLink {
   interface BaseOptions {
-    disable?: (error: ErrorResponse, errorsByMessageAndCode: ErrorsByMessageAndCode) => boolean;
+    disable?: (error: ErrorResponse, errorsByMessageAndCode: ProcessedErrors) => boolean;
+    retryQuery?: (error: ErrorResponse, errorsByMessageAndCode: ProcessedErrors) => boolean;
     useGETForHashedQueries?: boolean;
   };
 
@@ -52,54 +50,44 @@ export namespace PersistedQueryLink {
   export type Options = SHA256Options | GenerateHashOptions;
 }
 
-type ErrorsByMessageAndCode = { byMessage: Record<string, GraphQLError>; byCode: Record<string, GraphQLError> }
+type ProcessedErrors = { 
+  byMessage: Record<string, GraphQLError>; 
+  byCode: Record<string, GraphQLError>; 
+  persistedQueryNotSupported: boolean;
+  persistedQueryNotFound: boolean;
+}
 
-function collectErrorsByMessageAndCode(
+function processErrors(
   graphQLErrors: GraphQLError[] | readonly GraphQLError[] | undefined
-): ErrorsByMessageAndCode {
-  const collected: ErrorsByMessageAndCode = {
-    byMessage: Object.create(null),
-    byCode: Object.create(null),
-  };
+): ProcessedErrors {
+  const byMessage = Object.create(null),
+        byCode = Object.create(null);
+  
   if (isNonEmptyArray(graphQLErrors)) {
     graphQLErrors.forEach((error) => {
-      collected.byMessage[error.message] = error;
+      byMessage[error.message] = error;
       if (typeof error.extensions?.code == "string")
-        collected.byCode[error.extensions.code] = error;
+        byCode[error.extensions.code] = error;
     });
   }
-  return collected;
+  return {
+    byMessage,
+    byCode,
+    persistedQueryNotSupported: !!(byMessage.PersistedQueryNotSupported || byCode.PERSISTED_QUERY_NOT_SUPPORTED),
+    persistedQueryNotFound: !!(byMessage.PersistedQueryNotFound || byCode.PERSISTED_QUERY_NOT_FOUND),
+  };
 }
 
 const defaultOptions = {
-  disable: ({ operation }: ErrorResponse, {byMessage, byCode}: ErrorsByMessageAndCode) => {
-    // if the server doesn't support persisted queries, don't try anymore
-    if (
-      byMessage.PersistedQueryNotSupported ||
-      byCode[PersistedQueryNotSupported]
-    ) {
-      return true;
-    }
-
-    if (
-      byMessage.PersistedQueryNotFound ||
-      byCode[PersistedQueryNotFound]
-    ) {
-      return false;
-    }
-
-    const { response } = operation.getContext();
-    // if the server responds with bad request
-    // Apollo Server responds with 400 for GET and 500 for POST when no query is found
-    if (
-      response &&
-      response.status &&
-      (response.status === 400 || response.status === 500)
-    ) {
-      return true;
-    }
-
-    return false;
+  disable: ({}: ErrorResponse, { persistedQueryNotSupported }: ProcessedErrors) =>
+    persistedQueryNotSupported,
+  retryQuery: ({}: ErrorResponse, { persistedQueryNotSupported, persistedQueryNotFound }: ProcessedErrors) => {
+    //const { response = {} } = operation.getContext();
+    return (
+      persistedQueryNotSupported || persistedQueryNotFound
+      //response.status === 400 ||
+      //response.status === 500
+    );
   },
   useGETForHashedQueries: false,
 };
@@ -144,10 +132,10 @@ export const createPersistedQueryLink = (
     // `sha256` option will be ignored. Developers can configure and
     // use any hashing approach they want in a custom `generateHash`
     // function; they aren't limited to SHA-256.
-    generateHash = (query: DocumentNode) =>
-      Promise.resolve<string>(sha256!(print(query))),
+    generateHash = (query: DocumentNode) => Promise.resolve<string>(sha256!(print(query))),
     disable,
-    useGETForHashedQueries
+    retryQuery,
+    useGETForHashedQueries,
   } = compact(defaultOptions, options);
 
   let supportsPersistedQueries = true;
@@ -217,17 +205,13 @@ export const createPersistedQueryLink = (
             graphQLErrors: isNonEmptyArray(graphQLErrors) ? graphQLErrors : void 0,
           };
 
-          const errorsByMessageAndCode = collectErrorsByMessageAndCode(graphQLErrors);
+          const processedErrors = processErrors(graphQLErrors);
 
           // if the server doesn't support persisted queries, don't try anymore
-          supportsPersistedQueries = !disable(disablePayload, errorsByMessageAndCode);
+          supportsPersistedQueries = !disable(disablePayload, processedErrors);
 
           // if its not found, we can try it again, otherwise just report the error
-          if (
-            errorsByMessageAndCode.byMessage.PersistedQueryNotFound ||
-            errorsByMessageAndCode.byCode[PersistedQueryNotFound] ||
-            !supportsPersistedQueries
-          ) {
+          if (retryQuery(disablePayload, processedErrors)) {
             // need to recall the link chain
             if (subscription) subscription.unsubscribe();
             // actually send the query this time
