@@ -50,9 +50,9 @@ export namespace PersistedQueryLink {
   export type Options = SHA256Options | GenerateHashOptions;
 }
 
-type ProcessedErrors = { 
-  byMessage: Record<string, GraphQLError>; 
-  byCode: Record<string, GraphQLError>; 
+type ProcessedErrors = {
+  byMessage: Record<string, GraphQLError>;
+  byCode: Record<string, GraphQLError>;
   persistedQueryNotSupported: boolean;
   persistedQueryNotFound: boolean;
 }
@@ -62,7 +62,7 @@ function processErrors(
 ): ProcessedErrors {
   const byMessage = Object.create(null),
         byCode = Object.create(null);
-  
+
   if (isNonEmptyArray(graphQLErrors)) {
     graphQLErrors.forEach((error) => {
       byMessage[error.message] = error;
@@ -81,14 +81,8 @@ function processErrors(
 const defaultOptions = {
   disable: ({}: ErrorResponse, { persistedQueryNotSupported }: ProcessedErrors) =>
     persistedQueryNotSupported,
-  retryQuery: ({}: ErrorResponse, { persistedQueryNotSupported, persistedQueryNotFound }: ProcessedErrors) => {
-    //const { response = {} } = operation.getContext();
-    return (
-      persistedQueryNotSupported || persistedQueryNotFound
-      //response.status === 400 ||
-      //response.status === 500
-    );
-  },
+  retryQuery: ({}: ErrorResponse, { persistedQueryNotSupported, persistedQueryNotFound }: ProcessedErrors) =>
+    persistedQueryNotSupported || persistedQueryNotFound,
   useGETForHashedQueries: false,
 };
 
